@@ -2,10 +2,9 @@
 
 Este projeto armazena as provas de conceito para os artigos
 
-## Proof of Concepts
+## Provas de conceitos
 
-Accompanying proof-of-concept code will be used to demonstrate the
-security vulnerabilities.
+Artigos e provas de conceito utilizadas no blog https://blog.gris.dcc.ufrj.br/
 
 | Ano | Título |  Links |
 | ---- | ----- | ----- |
