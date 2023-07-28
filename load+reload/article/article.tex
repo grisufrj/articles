@@ -1,0 +1,415 @@
+\documentclass[twocolumn, 12pt]{article}
+
+\usepackage[brazilian]{babel}
+\usepackage{indentfirst}
+\usepackage[backend=biber,block=ragged]{biblatex}
+\usepackage{minted}
+\usepackage{csquotes}
+\usepackage{titlesec}
+\usepackage{microtype}
+
+\addbibresource{article.bib}
+
+\titleformat*{\section}{\large\bfseries}
+
+\author{Gabriel da Fonseca Ottoboni Pinho}
+\title{Load+Reload: Uma prova de conceito de um side-channel que explora a cache associativa de processadores AMD}
+
+\begin{document}
+
+\maketitle
+
+\section{Introdução}
+Em busca da maior performance possível,
+os processadores atuais
+tiram vantagem de diversos artifícios,
+muitas vezes sem grande consideração pela segurança.
+Nesse contexto,
+ataques como Spectre \cite{spectre} e Meltdown \cite{meltdown}
+mostram que a execução especulativa
+é um tópico muito interessante a ser explorado.
+Nesse artigo, construiremos uma prova de conceito
+do ataque Load+Reload \cite{takeaway},
+que tira vantagem do preditor de \textit{way}
+presente na cache dos
+processadores atuais da AMD.
+Durante esse processo,
+veremos uma forma diferente
+de medir o tempo de leitura
+da memória, a thread contadora,
+mais precisa do que a instrução \texttt{rdtsc},
+usada em ataques como Flush+Reload \cite{flushreload}.
+
+\section{Organização interna da cache}
+A cache de um processador é
+uma memória que armazena
+páginas de memória recentemente acessadas.
+Por na maior parte das vezes ser composta por
+células de memória estáticas (SRAM),
+a cache é múltiplas vezes mais rápida
+que a memória principal de um computador,
+que usa células dinâmicas (DRAM).
+
+A menor unidade dentro da cache é
+chamada de \textbf{linha} e geralmente
+tem o mesmo tamanho de uma página de memória.
+Uma certa página, no entanto,
+não necessariamente pode ser
+armazenada em qualquer linha.
+O grupo de linhas nas quais
+uma página pode ser amazenada
+é chamada de \textbf{set}.
+Além disso, cada linha de um set
+onde uma certa página pode ser armazenada
+é chamada de \textbf{way}.
+
+No caso mais simples,
+cada set tem apenas 1 way e
+a cache é considerada \textbf{diretamente mapeada},
+pois cada página só pode ser armazenada
+em exatamente uma linha.
+Se, pelo contrário, uma página
+pode ser armazenada em \textit{qualquer} linha,
+a cache é considerada \textbf{totalmente associativa},
+como se tivesse apenas 1 grande set.
+Por fim, se uma página pode ser armazenada em $n$ linhas,
+a cache é considerada \textbf{associativa por conjunto $n$-way}.
+
+Outro ponto importante é a forma
+como a cache será indexada e marcada.
+O \textbf{index} se refere ao endereço utilizado
+para acessar um certo set,
+enquanto que a \textbf{marca}\footnote{\textit{Tag} em inglês.}
+se refere a como cada way dentro de um set será identificado.
+Nos processadores Zen da AMD,
+a cache é \textbf{virtualmente indexada e fisicamente marcada (VIPT)}\footnote{\textit{Virtually indexed and physically tagged (VIPT)} em inglês.}\cite{amd}.
+Isso significa que a partir do endereço virtual
+de uma página é possível encontrar
+o set onde ela está armazenada na cache.
+Analogamente, a partir do endereço físico de uma página
+é possível encontrar em qual way do set página está.
+
+\section{Predição de way}
+Como explicado no tópico anterior,
+quando uma página de memória é requisitada,
+primeiro o endereço virtual dela
+é utilizado para determinar o set da cache
+onde ela pode estar armazenada.
+Após determinar o set,
+o endereço físico é
+utilizado para encontrar o way.
+A grande vantagem desse método
+é que o endereço físico pode
+ser calculado enquanto
+o set está sendo determinado.
+
+Na arquitetura Zen da AMD,
+a cache L1 de dados é
+associativa por conjunto 8-way\cite{amd},
+ou seja, pode ser necessário verificar
+a marca de 8 ways para saber
+em qual deles uma página
+pode estar armazenada.
+A fim de acelerar esse processo,
+o processador usa uma $\mu$marca
+para determinar se a página
+está ou não em um set\cite{amd}.
+A $\mu$marca é uma função
+do endereço virtual e,
+analogamente à marca normal,
+fica armazenada em cada way.
+Como ela não depende do
+endereço físico,
+o processador pode
+rapidamente verificar
+se algum way tem a $\mu$marca correspondente e,
+se nenhum tiver,
+imediamente desistir da cache L1
+e começar a procurar a página na cache L2,
+sem nem mesmo esperar a tradução
+do endereço virtual para o físico.
+
+O problema ocorre quando dois
+endereços virtuais \textit{distintos}
+referentes ao \textit{mesmo} endereço físico
+são acessados em sucessão.
+Cada acesso vai alterar a $\mu$marca,
+fazendo com que o próximo
+acesso caia para a cache L2,
+já que o preditor de way
+não encontrará a $\mu$marca
+que foi sobrescrita\cite{amd}.
+Nesse caso,
+todos os acessos serão
+feitos na cache L2,
+aumentando o tempo de acesso.
+
+\section{Ataques de cache}
+Um side-channel se baseia em extrair
+informação por meio de algum
+rastro deixado pela implementação de um sistema.
+A cache de um processador, por exemplo,
+implicitamente informa um processo
+se uma certa página de memória
+foi acessada recentemente.
+
+Se dois processos $A$ e $B$ compartilham
+a mesma página de memória,
+o processo $B$ pode medir
+o tempo gasto para ler a página e
+determinar se a mesma
+está ou não na cache.
+Caso a leitura seja rápida,
+a página estava na cache;
+caso contrário, não estava.
+Dessa forma,
+se o processo $B$ sabe
+que a página não estava
+na cache em um momento $t_1$
+e em um momento posterior $t_2$
+for determinado
+que a página estava na cache,
+pode-se concluir que
+o processo $A$ a acessou.
+
+\section{Medindo o tempo de acesso}
+\subsection{\texttt{rdtsc}}
+No artigo original do ataque Flush+Reload \cite{flushreload},
+a instrução \texttt{rdtsc} é utilizada para
+pedir o tempo de acesso à memória
+e determinar se uma certa página
+está ou não na cache.
+Essa instrução carrega o valor
+do \textit{time-stamp counter}
+nos registradores \texttt{edx:eax}.
+Assim, em conjunto com instruções
+de ordenação de execução,
+é possível calcular o
+tempo decorrido entre
+o início e fim da leitura.
+\begin{figure}[h]
+\begin{minted}[tabsize=4,frame=single]{c}
+uint64_t load_count(uint64_t *addr)
+{
+	uint64_t volatile time;
+	asm volatile (
+		"mfence              \n\t"
+		"lfence              \n\t"
+		"rdtsc               \n\t"
+		"lfence              \n\t"
+		"movl %%eax, %%ebx   \n\t"
+		"movq (%%rcx), %%rcx \n\t"
+		"lfence              \n\t"
+		"rdtsc               \n\t"
+		"subl %%ebx, %%eax   \n\t"
+		: "=a" (time)
+		: "c" (addr)
+		: "rbx"
+	);
+	return time;
+}
+\end{minted}
+\caption{Função que calcula o tempo de acesso a uma página usando a instrução \texttt{rdtsc}.}
+\end{figure}
+
+Um problema ao usar a instrução \texttt{rdtsc}
+é que nos processadores mais recentes da AMD
+ela não é mais tão precisa,
+pois tem seu contador incrementado
+a cada 30 ciclos aproximadamente \cite{takeaway}.
+Esse fato diminui muito
+a resolução da medição,
+principalmente em ataques
+nos quais a diferença
+do tempo de acesso
+é mais sutil.
+
+\subsection{A thread contadora}
+
+\begin{figure}[h]
+\begin{minted}[tabsize=4,frame=single]{c}
+uint64_t volatile count = 0;
+void *counting_thread(void *args) {
+	set_affinity(COUNTING_CORE);
+	asm volatile (
+		"xorq %%rax, %%rax   \n\t"
+		"loop%=:             \n\t"
+		"incq %%rax          \n\t"
+		"movq %%rax, (%%rbx) \n\t"
+		"jmp loop%=          \n\t"
+		:
+		: "b" (&count)
+		: "rax"
+	);
+
+	pthread_exit(NULL);
+}
+\end{minted}
+\caption{Função da thread contadora.}
+\end{figure}
+
+O artigo ARMageddon \cite{armageddon}
+mostrou que threads contadoras
+podem ter uma resolução tão boa
+ou melhor do que a instrução \texttt{rdtsc}
+em processadores ARM.
+A ideia é ter uma thread
+cujo único objetivo é
+incrementar uma variável global
+continuamente o mais rápido possível.
+
+A fim de ser o mais otimizada possível,
+a thread contadora armazena
+o valor atual de \texttt{count}
+no registrador \texttt{rax}
+e o copia para a memória
+após incrementá-la.
+Dessa forma,
+apenas uma escrita à memória é realizada
+e o valor atual é acessado
+exclusivamente pelo registrador.
+
+Um ponto importante a ser notado
+no código da thread contadora é
+o uso das instruções de ordenação
+\texttt{mfence} e \texttt{lfence}.
+Analogamente à medição do tempo
+usando a instrução \texttt{rdtsc},
+é necessário garantir que as duas
+leituras à variável \texttt{count}
+aconteçam antes e depois da leitura da página.
+Além disso,
+para o caso da thread contadora,
+é importante que a thread principal do atacante
+obtenha um valor minimamente atualizado de \texttt{count}.
+A seguir está reproduzido
+um trecho do manual da Intel
+sobre a instrução \texttt{mfence}.
+
+\foreignblockquote{english}[\cite{intel}]{
+This serializing operation guarantees that
+every load and store instruction that
+precedes the MFENCE instruction in program order
+becomes globally visible
+before any load or store instruction that
+follows the MFENCE instruction.
+}
+
+Dessa forma,
+segundo o manual,
+os incrementos realizados pela
+thread contadora na variável \texttt{count}
+durante a leitura da página
+se tornarão visíveis globalmente
+antes da segunda leitura de \texttt{count}
+que segue a instrução \texttt{mfence}.
+O uso dessa instrução é fundamental,
+pois sem ela as duas leituras de \texttt{count}
+retornariam o mesmo valor na maior parte das vezes,
+o que resultaria em um tempo de leitura nulo.
+
+\begin{figure}[h]
+\begin{minted}[tabsize=4,frame=single]{c}
+uint64_t load_count(uint64_t *addr)
+{
+	uint64_t volatile time;
+	asm volatile (
+		"mfence              \n\t"
+		"lfence              \n\t"
+		"movq (%%rbx), %%rcx \n\t"
+		"lfence              \n\t"
+		"movq (%%rax), %%rdx \n\t"
+		"lfence              \n\t"
+		"mfence              \n\t"
+		"movq (%%rbx), %%rax \n\t"
+		"subq %%rcx, %%rax   \n\t"
+		: "=a" (time)
+		: "a" (addr), "b" (&count)
+		: "rcx", "rdx"
+	);
+	return time;
+}
+\end{minted}
+\caption{Função que calcula o tempo de acesso a uma página usando a thread contadora.}
+\end{figure}
+
+%
+% O uso da thread contadora traz
+% outra questão interessante:
+% o tempo levado para um
+% núcleo do processador
+% receber a atualização
+% da variável \texttt{count}.
+
+\section{Load+Reload}
+
+Load+Reload é um dos dois ataques
+propostos no artigo Take a Way\cite{takeaway}
+e tira vantagem do fato que
+quando dois endereços virtuais \textit{distintos}
+referentes ao \textit{mesmo} endereço físico
+são acessados em sucessão,
+a leitura ocorrerá na cache L2.
+Esse comportamento, entretanto,
+só ocorre quando as threads sendo executadas
+estão no mesmo núcleo físico\cite{takeaway}.
+
+Foram então criados dois programas,
+uma vítima e um atacante,
+que serão executados em núcleos lógicos distintos,
+mas no mesmo núcleo físico.
+Para isso, foi utilizada a biblioteca \texttt{pthread}
+para criar a thread e
+prendê-la a um núcleo específico.
+
+A memória que será compartilhada
+entre a vítima e o atacante
+é um arquivo de 8MiB
+composto de bytes aleatórios
+mapeados na memória com a syscall \texttt{nmap}.
+O ataque consiste em uma vítima
+lendo continuamente partes do arquivo \texttt{data}
+usando caracteres de uma string \texttt{secret}.
+O caractere é multiplicado por 4096,
+de modo que cada byte do arquivo lido
+está em uma página distinta.
+\begin{figure}
+\begin{minted}[tabsize=4,frame=single]{c}
+read_byte(&data[secret[i] * 4096]);
+\end{minted}
+\caption{Leitura do arquivo a partir da string \texttt{secret}.}
+\end{figure}
+
+Enquanto isso,
+o atacante também lê continuamente o arquivo.
+Diferente da vítima, no entanto,
+o atacante selectiona todos os bytes de \texttt{0} até \texttt{0xff}
+como índice para a leitura do arquivo.
+\begin{minted}[tabsize=4,frame=single]{c}
+uint64_t time =
+	load_count(&data[byte * 4096]);
+\end{minted}
+
+O tempo levado para a leitura é então
+medido usando uma thread contadora
+e o byte que levou mais tempo
+para ser lido é escolhido como
+o que a vítima estava lendo
+naquele momento.
+
+A ideia é que se o byte
+sendo lido pelo atacante
+for o mesmo que está
+sendo lido pela vítima,
+a leitura do atacante
+cairá para a L2 por conta do preditor de way.
+Essa leitura na L2 levará
+consideravelmente mais tempo
+do que uma leitura na L1,
+e essa diferença pode ser medida
+usando a thread contadora.
+
+\pagebreak
+\printbibliography
+
+\end{document}
