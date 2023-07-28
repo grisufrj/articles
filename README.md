@@ -1,6 +1,6 @@
 # Artigos
 
-Este projeto armazena 
+Este projeto armazena as provas de conceito para os artigos
 
 ## Proof of Concepts
 
